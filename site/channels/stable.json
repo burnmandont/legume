@@ -1,0 +1,21 @@
+{
+  "artifacts": {
+    "x86_64": {
+      "parts": [
+        {
+          "sha256": "2ffab81a7d31c6ed232ec23428f16bc0776331adf63a1452cd4cbf414b67e9e5",
+          "url": "https://github.com/burnmandont/legume/releases/download/environment-v0.1.0/somebot-environment-0.1.0-linux-x86_64.tar.gz.part-01"
+        },
+        {
+          "sha256": "57a4a84011617f3459de89d7c1b717542c8aac6b5f5de6573528245f0e0a8fe7",
+          "url": "https://github.com/burnmandont/legume/releases/download/environment-v0.1.0/somebot-environment-0.1.0-linux-x86_64.tar.gz.part-02"
+        }
+      ],
+      "sha256": "a77c18f9c6d3ebb9b333cd04e6a578312e6bef43056535f3a7f2dfa2297df0ec"
+    }
+  },
+  "channel": "stable",
+  "platform": "linux",
+  "schema": 2,
+  "version": "0.1.0"
+}

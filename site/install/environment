@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Small online bootstrap rendered by publish-environment-release.sh.
+set -euo pipefail
+
+release_base=${SOMEBOT_RELEASE_BASE_DEFAULT:-https://launch.legume.love}
+trusted_key_b64=${SOMEBOT_RELEASE_PUBLIC_KEY_B64:-LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUNvd0JRWURLMlZ3QXlFQVEwMWJPb2NXYVYvT0t5NmxqUUkwL0sxWE9RQWloMVFpVVJCb05jMDllbWc9Ci0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLQo=}
+origin=''
+name=$(hostname -s 2>/dev/null || hostname)
+channel=stable
+
+usage() {
+  cat <<'EOF'
+Usage: install-environment --origin HTTPS_ORIGIN [--name NAME] [--channel CHANNEL]
+
+Downloads a signed, architecture-specific Somebot environment release, verifies
+it with the embedded release key, and runs its idempotent installer. Run as root.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --origin) origin=${2:?}; shift 2 ;;
+    --name) name=${2:?}; shift 2 ;;
+    --channel) channel=${2:?}; shift 2 ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+[[ $EUID == 0 ]] || { echo 'Run this installer as root (for example, pipe it to sudo bash).' >&2; exit 1; }
+[[ "$origin" =~ ^https://[^/]+/?$ ]] || { echo '--origin must be an HTTPS origin without a path.' >&2; exit 2; }
+[[ "$release_base" =~ ^https:// ]] || { echo 'Installer has no valid HTTPS release origin.' >&2; exit 1; }
+[[ "$channel" =~ ^[0-9A-Za-z._-]+$ ]] || { echo 'Invalid release channel.' >&2; exit 2; }
+for executable in cat curl find jq openssl sha256sum tar mktemp; do
+  command -v "$executable" >/dev/null || { echo "Missing bootstrap prerequisite: $executable" >&2; exit 1; }
+done
+
+work=$(mktemp -d /tmp/somebot-environment-bootstrap-XXXXXXXX)
+trap 'rm -rf -- "$work"' EXIT
+printf '%s' "$trusted_key_b64" | openssl base64 -d -A > "$work/release-key.pem"
+openssl pkey -pubin -in "$work/release-key.pem" -noout >/dev/null
+
+echo 'Somebot environment: checking signed release metadata'
+metadata_url="${release_base%/}/channels/$channel.json"
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$metadata_url" -o "$work/channel.json"
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$metadata_url.sig" -o "$work/channel.json.sig"
+openssl pkeyutl -verify -pubin -rawin -inkey "$work/release-key.pem" \
+  -sigfile "$work/channel.json.sig" -in "$work/channel.json" >/dev/null
+
+architecture=$(uname -m)
+case "$architecture" in x86_64|aarch64) ;; *) echo "Unsupported architecture: $architecture" >&2; exit 1 ;; esac
+jq -e --arg architecture "$architecture" '
+  (.schema == 1 or .schema == 2) and .platform == "linux" and
+  (.artifacts[$architecture].sha256|test("^[0-9a-f]{64}$")) and
+  ((.artifacts[$architecture].path|type == "string") or
+   ((.artifacts[$architecture].parts|type == "array") and
+    (.artifacts[$architecture].parts|length > 0) and
+    all(.artifacts[$architecture].parts[];
+      (.url|type == "string") and (.url|startswith("https://")) and
+      (.sha256|test("^[0-9a-f]{64}$")))))
+' \
+  "$work/channel.json" >/dev/null
+expected=$(jq -r --arg architecture "$architecture" '.artifacts[$architecture].sha256' "$work/channel.json")
+
+echo "Somebot environment: downloading $architecture release"
+if jq -e --arg architecture "$architecture" '.artifacts[$architecture].parts != null' "$work/channel.json" >/dev/null; then
+  : > "$work/environment.tar.gz"
+  part_number=0
+  while IFS=$'\t' read -r url part_sha; do
+    part_number=$((part_number + 1))
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      "$url" -o "$work/part"
+    printf '%s  %s\n' "$part_sha" "$work/part" | sha256sum --check --strict >/dev/null
+    cat "$work/part" >> "$work/environment.tar.gz"
+    echo "Somebot environment: verified download part $part_number"
+  done < <(jq -r --arg architecture "$architecture" '.artifacts[$architecture].parts[] | [.url,.sha256] | @tsv' "$work/channel.json")
+else
+  relative=$(jq -r --arg architecture "$architecture" '.artifacts[$architecture].path' "$work/channel.json")
+  [[ "$relative" =~ ^[0-9A-Za-z._/-]+$ && "$relative" != /* && "$relative" != *'..'* ]] || {
+    echo 'Signed release metadata contains an unsafe artifact path.' >&2; exit 1;
+  }
+  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    "${release_base%/}/$relative" -o "$work/environment.tar.gz"
+fi
+printf '%s  %s\n' "$expected" "$work/environment.tar.gz" | sha256sum --check --strict >/dev/null
+
+echo 'Somebot environment: verifying archive layout'
+tar -tzf "$work/environment.tar.gz" > "$work/archive-paths"
+while IFS= read -r path; do
+  path=${path#./}
+  [[ -n "$path" && "$path" != /* && "$path" != '..' && "$path" != ../* && "$path" != */../* ]] || {
+    echo "Unsafe path in release archive: $path" >&2; exit 1;
+  }
+done < "$work/archive-paths"
+tar -xzf "$work/environment.tar.gz" -C "$work"
+installer=$(find "$work" -mindepth 2 -maxdepth 2 -type f -name install -print -quit)
+[[ -n "$installer" ]] || { echo 'Release archive does not contain an installer.' >&2; exit 1; }
+
+echo 'Somebot environment: checking compatibility and installing Kata'
+"$installer" --install --origin "${origin%/}" --name "$name" --trust-key "$work/release-key.pem"
+echo 'Somebot environment: Kata VM ready'

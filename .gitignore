@@ -1,0 +1,10 @@
+# Environment bundles and release parts must be uploaded as Release assets.
+release-assets/
+*.tar
+*.tar.gz
+*.tar.zst
+*.part-*
+
+# Never commit private keys.
+*.key
+*-private.pem
